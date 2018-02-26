@@ -20,7 +20,8 @@ func main() {
 		paddle <- 0
 		<-paddle
 	}
-	println(time.Since(t).Seconds(), "seconds")
+	d := time.Since(t)
+	println(d.Seconds(), "seconds")
 
 	select {}
 }

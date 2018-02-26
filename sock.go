@@ -108,7 +108,7 @@ func (sock *Socket) initClient() {
 		go func(pkt []byte) {
 			// println("pkt=" + string(pkt))
 			if err := sock.read(pkt, nil); err != nil {
-				println(err.Error())
+				println("sock.read: " + err.Error())
 			}
 		}(js.Global.Get("Uint8Array").New(e.Get("data")).Interface().([]byte))
 	})
@@ -164,14 +164,14 @@ func (sock *Socket) initServer() {
 		for {
 			// println("pkt...")
 			mt, pkt, err := con.ReadMessage()
-			if err != nil {
-				println(err.Error())
+			if err != nil { // TODO: clean up cons to-be in typRteChs
+				println("sock.con: " + err.Error())
 				return
 			} else if mt != websocket.BinaryMessage {
-				println("message not binary")
+				println("sock: message not binary")
 				return
 			} else if err := sock.read(pkt, con); err != nil {
-				println(err.Error())
+				println("sock.read: " + err.Error())
 				return
 			}
 			// println("pkt=" + string(pkt))
@@ -228,7 +228,7 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 				{Dir: reflect.SelectRecv, Chan: r},
 				{Dir: reflect.SelectRecv, Chan: c},
 			})
-			if !recvOK {
+			if !recvOK { // TODO: clean up channel in typRteChs
 				println("[" + typ + "][" + rte + "][" + itoa(i) + "] broke")
 				return
 			}
@@ -252,7 +252,7 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 
 func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	p := bytes.Split(pkt, []byte(string([]rune{sock.PktSep})))
-	if len(p) != 4 || len(p[0]) == 0 {
+	if len(p) != 4 {
 		return errors.New("invalid packet")
 	}
 	typ, rte, i, b := string(p[0]), string(p[1]), btoi(p[2]), p[3]
