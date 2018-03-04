@@ -27,9 +27,9 @@ var (
 	Secure   = false
 	Addr     = "localhost:80"
 	Root     = "www"
-	Route    = "/317d37b0edc7bd7cbd25d97f53a16ce5"
+	Route    = "/43138aa2e4a54cecb4582dd548c2642b2e2ab69c"
 	RteSep   = '\t'
-	PktSep   = '▼'
+	PktSep   = '\v'
 
 	sock Socket
 )
@@ -39,6 +39,12 @@ func Add(ch interface{}, route ...string) {
 	sock.Add(ch, route...)
 }
 
+type chnl struct {
+	reflect.Value
+	cons map[*websocket.Conn]byte
+}
+
+// Socket is a line of communication between remote endpoints.
 type Socket struct {
 	initOnce sync.Once
 
@@ -53,47 +59,46 @@ type Socket struct {
 	ws  *js.Object
 	mux *http.ServeMux
 
-	cons_mu sync.Mutex
-	cons    map[*websocket.Conn]byte
-
 	typRteChs_mu sync.Mutex
-	typRteChs    map[string]map[string][][2]reflect.Value
+	typRteChs    map[string]map[string][]chnl
 
 	types_mu sync.Mutex
 	types    map[string]reflect.Type
 }
 
 func (sock *Socket) init() {
-	if !sock.IsClient {
-		sock.IsClient = IsClient
-	}
-	if !sock.Secure {
-		sock.Secure = Secure
-	}
-	if len(sock.Addr) == 0 {
-		sock.Addr = Addr
-	}
-	if len(sock.Root) == 0 {
-		sock.Root = Root
-	}
-	if len(sock.Route) == 0 {
-		sock.Route = Route
-	}
-	if sock.RteSep == 0 {
-		sock.RteSep = RteSep
-	}
-	if sock.PktSep == 0 {
-		sock.PktSep = PktSep
-	}
+	sock.initOnce.Do(func() {
+		if !sock.IsClient {
+			sock.IsClient = IsClient
+		}
+		if !sock.Secure {
+			sock.Secure = Secure
+		}
+		if len(sock.Addr) == 0 {
+			sock.Addr = Addr
+		}
+		if len(sock.Root) == 0 {
+			sock.Root = Root
+		}
+		if len(sock.Route) == 0 {
+			sock.Route = Route
+		}
+		if sock.RteSep == 0 {
+			sock.RteSep = RteSep
+		}
+		if sock.PktSep == 0 {
+			sock.PktSep = PktSep
+		}
 
-	sock.typRteChs = make(map[string]map[string][][2]reflect.Value)
-	sock.types = make(map[string]reflect.Type)
+		sock.typRteChs = make(map[string]map[string][]chnl)
+		sock.types = make(map[string]reflect.Type)
 
-	if sock.IsClient {
-		sock.initClient()
-	} else {
-		sock.initServer()
-	}
+		if sock.IsClient {
+			sock.initClient()
+		} else {
+			sock.initServer()
+		}
+	})
 }
 
 func (sock *Socket) initClient() {
@@ -103,7 +108,6 @@ func (sock *Socket) initClient() {
 	}
 	sock.ws = js.Global.Get("WebSocket").New(wsOrWSS + sock.Addr + sock.Route)
 	sock.ws.Set("binaryType", "arraybuffer")
-	println("ws open!")
 	sock.ws.Set("onmessage", func(e *js.Object) {
 		go func(pkt []byte) {
 			// println("pkt=" + string(pkt))
@@ -118,11 +122,11 @@ func (sock *Socket) initClient() {
 	c := make(chan byte, 1)
 	sock.ws.Set("onopen", func() { c <- 0 })
 	<-c
+	// println("ws open!")
 }
 
 func (sock *Socket) initServer() {
 	sock.mux = new(http.ServeMux)
-	sock.cons = make(map[*websocket.Conn]byte)
 
 	if len(sock.Root) > 0 {
 		if _, err := os.Stat(sock.Root); os.IsNotExist(err) {
@@ -147,34 +151,38 @@ func (sock *Socket) initServer() {
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 	sock.mux.HandleFunc(sock.Route, func(w http.ResponseWriter, r *http.Request) {
-		println(sock.Route + " !")
+		// println(sock.Route + " !")
 		con, err := upgr.Upgrade(w, r, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		sock.cons_mu.Lock()
-		sock.cons[con] = 0
-		sock.cons_mu.Unlock()
-		defer func() {
-			sock.cons_mu.Lock()
-			delete(sock.cons, con)
-			sock.cons_mu.Unlock()
-		}()
 		for {
 			// println("pkt...")
 			mt, pkt, err := con.ReadMessage()
 			if err != nil { // TODO: clean up cons to-be in typRteChs
 				println("sock.con: " + err.Error())
-				return
+				break
 			} else if mt != websocket.BinaryMessage {
 				println("sock: message not binary")
-				return
+				break
 			} else if err := sock.read(pkt, con); err != nil {
 				println("sock.read: " + err.Error())
-				return
+				break
 			}
 			// println("pkt=" + string(pkt))
+		}
+		sock.typRteChs_mu.Lock()
+		defer sock.typRteChs_mu.Unlock()
+		for typ, rteChs := range sock.typRteChs {
+			for rte, chs := range rteChs {
+				for i, ch := range chs {
+					if _, found := ch.cons[con]; found {
+						println("decompiling [" + typ + "][" + rte + "][" + itoa(i) + "]")
+						delete(sock.typRteChs[typ][rte][i].cons, con)
+					}
+				}
+			}
 		}
 	})
 
@@ -183,7 +191,7 @@ func (sock *Socket) initServer() {
 
 // Add adds a channel with a route to the socket.
 func (sock *Socket) Add(ch interface{}, route ...string) {
-	sock.initOnce.Do(sock.init)
+	sock.init()
 
 	c := reflect.ValueOf(ch)
 	t := reflect.TypeOf(ch)
@@ -213,13 +221,13 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 
 	rteChs, found := sock.typRteChs[typ]
 	if !found {
-		rteChs = make(map[string][][2]reflect.Value)
+		rteChs = make(map[string][]chnl)
 		sock.typRteChs[typ] = rteChs
 	}
 
 	i := len(rteChs[rte])
 	r := reflect.MakeChan(t, 0)
-	rteChs[rte] = append(rteChs[rte], [2]reflect.Value{r, c})
+	rteChs[rte] = append(rteChs[rte], chnl{r, make(map[*websocket.Conn]byte)})
 
 	go func() {
 		for {
@@ -271,7 +279,14 @@ func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	if i >= len(chs) {
 		return errors.New("[" + typ + "][" + rte + "][" + itoa(i) + "] not found")
 	}
-	r := chs[i][0]
+	r := chs[i]
+
+	if con != nil {
+		if _, found := r.cons[con]; !found {
+			println("compiling [" + typ + "][" + rte + "][" + itoa(i) + "]")
+			r.cons[con] = 0
+		}
+	}
 
 	sock.types_mu.Lock()
 	ele := sock.types[typ]
@@ -300,16 +315,27 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 		return
 	}
 
-	sock.cons_mu.Lock()
-	defer sock.cons_mu.Unlock()
+	sock.typRteChs_mu.Lock()
+	defer sock.typRteChs_mu.Unlock()
 
-	// TODO: only write to cons requesting
-	for con := range sock.cons {
+	rteChs, found := sock.typRteChs[typ]
+	if !found {
+		return errors.New("[" + typ + "] not found")
+	}
+	chs, found := rteChs[rte]
+	if !found {
+		return errors.New("[" + typ + "][" + rte + "] not found")
+	}
+	if i >= len(chs) {
+		return errors.New("[" + typ + "][" + rte + "][" + itoa(i) + "] not found")
+	}
+	r := chs[i]
+
+	for con := range r.cons { // write to all compiled connections
 		if err := con.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
 			println("sock.write: " + err.Error())
 		}
 	}
-
 	return
 }
 
