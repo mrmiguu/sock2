@@ -13,15 +13,13 @@ func main() {
 	sock2.Add(paddle, "paddle", "1")
 
 	t := <-start
+	close(start)
 	println("started!")
 
-	var i, i2 int
+	var i int
 	for range [100]int{} {
-		i2 = <-paddle
-		if i != i2 {
-			i = i2 // proves we didn't just read what we wrote
-		}
-		paddle <- i + 1
+		i = 1 + <-paddle
+		paddle <- i
 	}
 	d := time.Since(t)
 	println(d.Seconds(), "seconds")

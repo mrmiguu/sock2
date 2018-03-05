@@ -14,15 +14,13 @@ func main() {
 
 	t := time.Now()
 	start <- t
+	close(start)
 	println("started!")
 
-	var i, i2 int
+	i := 0
 	for range [100]int{} {
 		paddle <- i
-		i2 = <-paddle
-		if i != i2 {
-			i = i2 // proves we didn't just read what we wrote
-		}
+		i = <-paddle
 	}
 	d := time.Since(t)
 	println(d.Seconds(), "seconds")

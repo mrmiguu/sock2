@@ -39,9 +39,21 @@ func Add(ch interface{}, route ...string) {
 	sock.Add(ch, route...)
 }
 
-type chnl struct {
+type (
+	channels          map[int]channel
+	routeChannels     map[string]channels
+	typeRouteChannels map[string]routeChannels
+	connections       map[*websocket.Conn]byte
+)
+
+type channel struct {
 	reflect.Value
-	cons map[*websocket.Conn]byte
+	connections
+}
+
+type safeTRC struct {
+	sync.Mutex
+	typeRouteChannels
 }
 
 // Socket is a line of communication between remote endpoints.
@@ -59,8 +71,7 @@ type Socket struct {
 	ws  *js.Object
 	mux *http.ServeMux
 
-	typRteChs_mu sync.Mutex
-	typRteChs    map[string]map[string][]chnl
+	safeTRC
 
 	types_mu sync.Mutex
 	types    map[string]reflect.Type
@@ -90,7 +101,7 @@ func (sock *Socket) init() {
 			sock.PktSep = PktSep
 		}
 
-		sock.typRteChs = make(map[string]map[string][]chnl)
+		sock.safeTRC = safeTRC{typeRouteChannels: make(typeRouteChannels)}
 		sock.types = make(map[string]reflect.Type)
 
 		if sock.IsClient {
@@ -172,14 +183,14 @@ func (sock *Socket) initServer() {
 			}
 			// println("pkt=" + string(pkt))
 		}
-		sock.typRteChs_mu.Lock()
-		defer sock.typRteChs_mu.Unlock()
-		for typ, rteChs := range sock.typRteChs {
+		sock.safeTRC.Lock()
+		defer sock.safeTRC.Unlock()
+		for typ, rteChs := range sock.typeRouteChannels {
 			for rte, chs := range rteChs {
 				for i, ch := range chs {
-					if _, found := ch.cons[con]; found {
-						println("decompiling [" + typ + "][" + rte + "][" + itoa(i) + "]")
-						delete(sock.typRteChs[typ][rte][i].cons, con)
+					if _, found := ch.connections[con]; found {
+						println("deleting connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
+						delete(sock.typeRouteChannels[typ][rte][i].connections, con)
 					}
 				}
 			}
@@ -216,18 +227,23 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 
 	rte := sock.join(route)
 
-	sock.typRteChs_mu.Lock()
-	defer sock.typRteChs_mu.Unlock()
+	sock.safeTRC.Lock()
+	defer sock.safeTRC.Unlock()
 
-	rteChs, found := sock.typRteChs[typ]
+	rteChs, found := sock.typeRouteChannels[typ]
 	if !found {
-		rteChs = make(map[string][]chnl)
-		sock.typRteChs[typ] = rteChs
+		rteChs = make(routeChannels)
+		sock.typeRouteChannels[typ] = rteChs
 	}
 
-	i := len(rteChs[rte])
+	chs, found := rteChs[rte]
+	if !found {
+		chs = make(channels)
+		rteChs[rte] = chs
+	}
 	r := reflect.MakeChan(t, 0)
-	rteChs[rte] = append(rteChs[rte], chnl{r, make(map[*websocket.Conn]byte)})
+	i := len(chs)
+	chs[i] = channel{r, make(connections)}
 
 	go func() {
 		for {
@@ -237,7 +253,20 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 				{Dir: reflect.SelectRecv, Chan: c},
 			})
 			if !recvOK { // TODO: clean up channel in typRteChs
-				println("[" + typ + "][" + rte + "][" + itoa(i) + "] broke")
+				sock.safeTRC.Lock()
+				defer sock.safeTRC.Unlock()
+				rteChs := sock.typeRouteChannels[typ]
+				chs := rteChs[rte]
+				println("deleting all connections [" + typ + "][" + rte + "][" + itoa(i) + "]")
+				delete(chs, i)
+				if len(chs) == 0 {
+					println("deleting all connections [" + typ + "][" + rte + "]")
+					delete(rteChs, rte)
+					if len(rteChs) == 0 {
+						println("deleting all connections [" + typ + "]")
+						delete(sock.typeRouteChannels, typ)
+					}
+				}
 				return
 			}
 			switch chosen {
@@ -265,10 +294,10 @@ func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	}
 	typ, rte, i, b := string(p[0]), string(p[1]), btoi(p[2]), p[3]
 
-	sock.typRteChs_mu.Lock()
-	defer sock.typRteChs_mu.Unlock()
+	sock.safeTRC.Lock()
+	defer sock.safeTRC.Unlock()
 
-	rteChs, found := sock.typRteChs[typ]
+	rteChs, found := sock.typeRouteChannels[typ]
 	if !found {
 		return errors.New("[" + typ + "] not found")
 	}
@@ -282,9 +311,9 @@ func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	r := chs[i]
 
 	if con != nil {
-		if _, found := r.cons[con]; !found {
-			println("compiling [" + typ + "][" + rte + "][" + itoa(i) + "]")
-			r.cons[con] = 0
+		if _, found := r.connections[con]; !found {
+			println("adding connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
+			r.connections[con] = 0
 		}
 	}
 
@@ -315,10 +344,10 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 		return
 	}
 
-	sock.typRteChs_mu.Lock()
-	defer sock.typRteChs_mu.Unlock()
+	sock.safeTRC.Lock()
+	defer sock.safeTRC.Unlock()
 
-	rteChs, found := sock.typRteChs[typ]
+	rteChs, found := sock.typeRouteChannels[typ]
 	if !found {
 		return errors.New("[" + typ + "] not found")
 	}
@@ -331,7 +360,7 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 	}
 	r := chs[i]
 
-	for con := range r.cons { // write to all compiled connections
+	for con := range r.connections {
 		if err := con.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
 			println("sock.write: " + err.Error())
 		}
