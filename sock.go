@@ -48,7 +48,7 @@ type (
 )
 
 type safe struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
 func (s *safe) lock() {
@@ -56,6 +56,12 @@ func (s *safe) lock() {
 }
 func (s *safe) unlock() {
 	s.mu.Unlock()
+}
+func (s *safe) rlock() {
+	s.mu.RLock()
+}
+func (s *safe) runlock() {
+	s.mu.RUnlock()
 }
 
 type channel struct {
@@ -115,8 +121,8 @@ func (sock *Socket) init() {
 			sock.PktSep = PktSep
 		}
 
-		sock.safeTRC = safeTRC{typeRouteChannels: make(typeRouteChannels)}
-		sock.types = make(map[string]reflect.Type)
+		sock.typeRouteChannels = make(typeRouteChannels)
+		sock.types = make(types)
 
 		if sock.IsClient {
 			sock.initClient()
@@ -204,7 +210,7 @@ func (sock *Socket) initServer() {
 				for i, ch := range chs {
 					if _, found := ch.connections[con]; found {
 						println("deleting connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
-						delete(sock.typeRouteChannels[typ][rte][i].connections, con)
+						delete(ch.connections, con)
 					}
 				}
 			}
@@ -231,9 +237,14 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 	}
 
 	ele := t.Elem()
+	isErr := isErr(ele)
+	if !isErr && ele.Kind() == reflect.Interface {
+		panic("sock.Add: interface chan")
+	}
+
 	typ := ele.String()
 	sock.safeTypes.lock()
-	if _, found := sock.types[typ]; !found {
+	if _, found := sock.types[typ]; !isErr && !found {
 		gob.Register(reflect.Zero(ele).Interface())
 	}
 	sock.types[typ] = ele
@@ -266,7 +277,7 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 				{Dir: reflect.SelectRecv, Chan: r},
 				{Dir: reflect.SelectRecv, Chan: c},
 			})
-			if !recvOK { // TODO: clean up channel in typRteChs
+			if !recvOK {
 				sock.safeTRC.lock()
 				defer sock.safeTRC.unlock()
 				rteChs := sock.typeRouteChannels[typ]
@@ -289,11 +300,20 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 				c.Send(v)
 			case 1:
 				// println("[" + typ + "][" + rte + "][" + itoa(i) + "] write")
-				var buf bytes.Buffer
-				if err := gob.NewEncoder(&buf).EncodeValue(v); err != nil {
-					panic("sock.encode: " + err.Error())
+				var b []byte
+				if !isErr {
+					var buf bytes.Buffer
+					if err := gob.NewEncoder(&buf).EncodeValue(v); err != nil {
+						panic("sock.encode: " + err.Error())
+					}
+					b = buf.Bytes()
+				} else {
+					b = []byte{}
+					if err, ok := v.Interface().(error); ok && err != nil {
+						b = []byte(err.Error())
+					}
 				}
-				if err := sock.write(typ, rte, i, buf.Bytes()); err != nil {
+				if err := sock.write(typ, rte, i, b); err != nil {
 					panic("sock.write: " + err.Error())
 				}
 			}
@@ -309,40 +329,49 @@ func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	typ, rte, i, b := string(p[0]), string(p[1]), btoi(p[2]), p[3]
 
 	sock.safeTRC.lock()
-	defer sock.safeTRC.unlock()
-
 	rteChs, found := sock.typeRouteChannels[typ]
 	if !found {
+		sock.safeTRC.unlock()
 		return errors.New("[" + typ + "] not found")
 	}
 	chs, found := rteChs[rte]
 	if !found {
+		sock.safeTRC.unlock()
 		return errors.New("[" + typ + "][" + rte + "] not found")
 	}
 	if i >= len(chs) {
+		sock.safeTRC.unlock()
 		return errors.New("[" + typ + "][" + rte + "][" + itoa(i) + "] not found")
 	}
 	r := chs[i]
-
 	if con != nil {
 		if _, found := r.connections[con]; !found {
 			println("adding connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
 			r.connections[con] = 0
 		}
 	}
+	sock.safeTRC.unlock()
 
-	sock.safeTypes.lock()
+	sock.safeTypes.rlock()
 	ele := sock.types[typ]
-	sock.safeTypes.unlock()
+	sock.safeTypes.runlock()
 
-	// println("<-[" + typ + "][" + rte + "][" + itoa(i) + "]...")
+	isErr := isErr(ele)
+	if isErr {
+		var err error
+		if len(b) > 0 {
+			err = errors.New(string(b))
+		}
+		r.Interface().(chan error) <- err
+		return nil
+	}
+
 	v := reflect.New(ele).Elem()
 	if err := gob.NewDecoder(bytes.NewReader(b)).DecodeValue(v); err != nil {
 		return err
 	}
-	r.Send(v)
-	// println("<-[" + typ + "][" + rte + "][" + itoa(i) + "]!")
 
+	r.Send(v)
 	return nil
 }
 
@@ -358,8 +387,8 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 		return
 	}
 
-	sock.safeTRC.lock()
-	defer sock.safeTRC.unlock()
+	sock.safeTRC.rlock()
+	defer sock.safeTRC.runlock()
 
 	rteChs, found := sock.typeRouteChannels[typ]
 	if !found {
@@ -379,6 +408,8 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 			println("sock.write: " + err.Error())
 		}
 	}
+	// println("[" + typ + "][" + rte + "][" + itoa(i) + "] connections written to")
+
 	return
 }
 
@@ -410,4 +441,8 @@ func itob(i int) []byte {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], uint64(i))
 	return b[:]
+}
+
+func isErr(t reflect.Type) bool {
+	return t.Kind() == reflect.Interface && t.Implements(reflect.TypeOf((*error)(nil)).Elem())
 }
