@@ -270,6 +270,13 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 	i := len(chs)
 	chs[i] = channel{r, make(connections)}
 
+	if sock.IsClient {
+		println("adding connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
+		if err := sock.write(typ, rte, i, []byte{}); err != nil { // connect
+			panic("sock.write: " + err.Error())
+		}
+	}
+
 	go func() {
 		for {
 			// println("[" + typ + "][" + rte + "][" + itoa(i) + "] selecting")
@@ -348,6 +355,8 @@ func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 		if _, found := r.connections[con]; !found {
 			println("adding connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
 			r.connections[con] = 0
+			sock.safeTRC.unlock()
+			return nil
 		}
 	}
 	sock.safeTRC.unlock()
@@ -403,10 +412,16 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 	}
 	r := chs[i]
 
+	if typ == "error" {
+		println(`con.WriteMessage...`, len(r.connections))
+	}
 	for con := range r.connections {
 		if err := con.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
 			println("sock.write: " + err.Error())
 		}
+	}
+	if typ == "error" {
+		println(`con.WriteMessage!`, len(r.connections))
 	}
 	// println("[" + typ + "][" + rte + "][" + itoa(i) + "] connections written to")
 

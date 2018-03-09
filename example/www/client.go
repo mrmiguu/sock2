@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"time"
 
 	"github.com/mrmiguu/sock2"
@@ -32,11 +31,11 @@ func main() {
 	d := time.Since(t)
 	println(d.Seconds(), "seconds")
 
-	var e error
-	if i != 100 {
-		e = errors.New("i is not 100")
+	println("i:", i) // should be 100
+	if e := <-err; e != nil {
+		panic("i != 100; " + e.Error())
 	}
-	err <- e
+	println("i == 100")
 
 	select {}
 }
