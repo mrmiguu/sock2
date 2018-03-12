@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gopherjs/gopherjs/js"
 	"github.com/gorilla/websocket"
@@ -65,6 +66,7 @@ func (s *safe) runlock() {
 }
 
 type channel struct {
+	*safe
 	reflect.Value
 	connections
 }
@@ -211,6 +213,9 @@ func (sock *Socket) initServer() {
 					if _, found := ch.connections[con]; found {
 						println("deleting connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
 						delete(ch.connections, con)
+						if len(ch.connections) == 0 {
+							ch.lock()
+						}
 					}
 				}
 			}
@@ -268,17 +273,34 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 	}
 	r := reflect.MakeChan(t, 0)
 	i := len(chs)
-	chs[i] = channel{r, make(connections)}
+	chs[i] = channel{&safe{}, r, make(connections)}
+	chs[i].lock()
 
 	if sock.IsClient {
-		println("adding connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
-		if err := sock.write(typ, rte, i, []byte{}); err != nil { // connect
-			panic("sock.write: " + err.Error())
-		}
+		go func() {
+			for len(chs[i].connections) == 0 {
+				println("requesting [" + typ + "][" + rte + "][" + itoa(i) + "]")
+				if err := sock.write(typ, rte, i, []byte{}); err != nil { // connect
+					panic("sock.write: " + err.Error())
+				}
+				time.Sleep(2 * time.Second)
+			}
+		}()
 	}
 
 	go func() {
 		for {
+			if len(chs[i].connections) == 0 {
+				println("waiting [" + typ + "][" + rte + "][" + itoa(i) + "]")
+				chs[i].lock()
+				chs[i].unlock()
+				if !sock.IsClient {
+					println("requesting [" + typ + "][" + rte + "][" + itoa(i) + "]")
+					if err := sock.write(typ, rte, i, []byte{}); err != nil { // connect
+						panic("sock.write: " + err.Error())
+					}
+				}
+			}
 			// println("[" + typ + "][" + rte + "][" + itoa(i) + "] selecting")
 			chosen, v, recvOK := reflect.Select([]reflect.SelectCase{
 				{Dir: reflect.SelectRecv, Chan: r},
@@ -339,25 +361,27 @@ func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	rteChs, found := sock.typeRouteChannels[typ]
 	if !found {
 		sock.safeTRC.unlock()
-		return errors.New("[" + typ + "] not found")
+		println("[" + typ + "] not found")
+		return nil
 	}
 	chs, found := rteChs[rte]
 	if !found {
 		sock.safeTRC.unlock()
-		return errors.New("[" + typ + "][" + rte + "] not found")
+		println("[" + typ + "][" + rte + "] not found")
+		return nil
 	}
 	if i >= len(chs) {
 		sock.safeTRC.unlock()
-		return errors.New("[" + typ + "][" + rte + "][" + itoa(i) + "] not found")
+		println("[" + typ + "][" + rte + "][" + itoa(i) + "] not found")
+		return nil
 	}
 	r := chs[i]
-	if con != nil {
-		if _, found := r.connections[con]; !found {
-			println("adding connection [" + typ + "][" + rte + "][" + itoa(i) + "]")
-			r.connections[con] = 0
-			sock.safeTRC.unlock()
-			return nil
-		}
+	if _, found := r.connections[con]; !found {
+		println("connected [" + typ + "][" + rte + "][" + itoa(i) + "]")
+		r.connections[con] = 0
+		sock.safeTRC.unlock()
+		r.unlock()
+		return nil
 	}
 	sock.safeTRC.unlock()
 
