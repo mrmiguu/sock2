@@ -301,11 +301,12 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 					}
 				}
 			}
-			// println("[" + typ + "][" + rte + "][" + itoa(i) + "] selecting")
-			chosen, v, recvOK := reflect.Select([]reflect.SelectCase{
+			cases := []reflect.SelectCase{
 				{Dir: reflect.SelectRecv, Chan: r},
 				{Dir: reflect.SelectRecv, Chan: c},
-			})
+			}
+			// println("[" + typ + "][" + rte + "][" + itoa(i) + "] selecting")
+			chosen, v, recvOK := reflect.Select(cases)
 			if !recvOK {
 				sock.safeTRC.lock()
 				defer sock.safeTRC.unlock()

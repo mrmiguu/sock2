@@ -6,13 +6,25 @@ import (
 	"github.com/mrmiguu/sock2"
 )
 
+type auth struct {
+	User string
+	Pass string
+}
+
 func main() {
-	start := make(chan time.Time)
-	sock2.Add(start)
-	defer close(start)
+	login := make(chan auth)
+	err := make(chan error)
+	sock2.Add(login)
+	sock2.Add(err)
+	defer close(login)
+	defer close(err)
+
+	login <- auth{"user", "pass"}
+	if err := <-err; err != nil {
+		panic(err)
+	}
 
 	t := time.Now()
-	start <- t
 	println("started!")
 
 	paddle := make(chan int)
@@ -26,10 +38,6 @@ func main() {
 	}
 	d := time.Since(t)
 	println(d.Seconds(), "seconds")
-
-	err := make(chan error)
-	sock2.Add(err)
-	defer close(err)
 
 	println("i:", i) // should be 100
 	if e := <-err; e != nil {
