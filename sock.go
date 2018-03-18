@@ -437,16 +437,10 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 	}
 	r := chs[i]
 
-	if typ == "error" {
-		println(`con.WriteMessage...`, len(r.connections))
-	}
 	for con := range r.connections {
 		if err := con.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
 			println("sock.write: " + err.Error())
 		}
-	}
-	if typ == "error" {
-		println(`con.WriteMessage!`, len(r.connections))
 	}
 	// println("[" + typ + "][" + rte + "][" + itoa(i) + "] connections written to")
 
