@@ -30,7 +30,7 @@ var (
 	Root     = "www"
 	Route    = "/43138aa2e4a54cecb4582dd548c2642b2e2ab69c"
 	RteSep   = '\t'
-	PktSep   = '\v'
+	PktSep   = '▼'
 
 	sock Socket
 )
@@ -92,8 +92,9 @@ type Socket struct {
 	RteSep   rune
 	PktSep   rune
 
-	ws  *js.Object
-	mux *http.ServeMux
+	ws    *js.Object
+	mux   *http.ServeMux
+	slock safe
 
 	safeTRC
 	safeTypes
@@ -276,8 +277,8 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 	chs[i] = channel{&safe{}, r, make(connections)}
 	chs[i].lock()
 
-	if sock.IsClient {
-		go func() {
+	go func() {
+		if sock.IsClient {
 			for len(chs[i].connections) == 0 {
 				println("requesting [" + typ + "][" + rte + "][" + itoa(i) + "]")
 				if err := sock.write(typ, rte, i, []byte{}); err != nil { // connect
@@ -285,10 +286,8 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 				}
 				time.Sleep(2 * time.Second)
 			}
-		}()
-	}
+		}
 
-	go func() {
 		for {
 			if len(chs[i].connections) == 0 {
 				println("waiting [" + typ + "][" + rte + "][" + itoa(i) + "]")
@@ -354,7 +353,7 @@ func (sock *Socket) Add(ch interface{}, route ...string) {
 func (sock *Socket) read(pkt []byte, con *websocket.Conn) error {
 	p := bytes.Split(pkt, []byte(string([]rune{sock.PktSep})))
 	if len(p) != 4 {
-		return errors.New("invalid packet")
+		return errors.New(`invalid packet; (` + itoa(len(p)) + `) parts`)
 	}
 	typ, rte, i, b := string(p[0]), string(p[1]), btoi(p[2]), p[3]
 
@@ -416,7 +415,9 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 
 	if sock.IsClient {
 		// println("[" + typ + "][" + rte + "][" + itoa(i) + "] <- '" + string(b) + "'...")
+		sock.slock.lock()
 		sock.ws.Call("send", pkt)
+		sock.slock.unlock()
 		// println("[" + typ + "][" + rte + "][" + itoa(i) + "] <- '" + string(b) + "'!")
 		return
 	}
@@ -438,9 +439,11 @@ func (sock *Socket) write(typ, rte string, i int, b []byte) (err error) {
 	r := chs[i]
 
 	for con := range r.connections {
+		sock.slock.lock()
 		if err := con.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
 			println("sock.write: " + err.Error())
 		}
+		sock.slock.unlock()
 	}
 	// println("[" + typ + "][" + rte + "][" + itoa(i) + "] connections written to")
 

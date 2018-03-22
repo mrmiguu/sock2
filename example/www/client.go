@@ -1,28 +1,32 @@
 package main
 
 import (
+	"errors"
 	"time"
 
 	"github.com/mrmiguu/sock2"
 )
 
-type auth struct {
-	User string
-	Pass string
-}
-
 func main() {
-	login := make(chan auth)
+	login := make(chan []string)
 	err := make(chan error)
 	sock2.Add(login)
 	sock2.Add(err)
 	defer close(login)
 	defer close(err)
 
-	login <- auth{"user", "pass"}
-	if err := <-err; err != nil {
-		panic(err)
+	auth := <-login
+	if len(auth[0]) == 0 {
+		e := errors.New("empty user")
+		err <- e
+		panic(e)
 	}
+	if len(auth[1]) == 0 {
+		e := errors.New("empty pass")
+		err <- e
+		panic(e)
+	}
+	err <- nil
 
 	t := time.Now()
 	println("started!")
